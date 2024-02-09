@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.orig
 
 # Distribution / packaging
 .Python
@@ -124,4 +125,4 @@ itests/out/*
 example.html
 example.jpg
 nice-cat.jpg
-venvp310
+venv*

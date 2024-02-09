@@ -1,4 +1,7 @@
 import logging
+from contextlib import asynccontextmanager
+from functools import wraps
+from inspect import signature, unwrap
 from pathlib import Path
 from typing import (
     Any,
@@ -20,14 +23,15 @@ from guardpost import (
     Policy,
     UnauthorizedError,
 )
+from guardpost.authorization import ForbiddenError
 from guardpost.common import AuthenticatedRequirement
 from itsdangerous import Serializer
 from rodi import ContainerProtocol
 
 from blacksheep.baseapp import BaseApplication, handle_not_found
+from blacksheep.common import extend
 from blacksheep.common.files.asyncfs import FilesHandler
 from blacksheep.contents import ASGIContent
-from blacksheep.exceptions import HTTPException
 from blacksheep.messages import Request, Response
 from blacksheep.middlewares import get_middlewares_chain
 from blacksheep.scribe import send_asgi_response
@@ -40,26 +44,32 @@ from blacksheep.server.authentication import (
 from blacksheep.server.authorization import (
     AuthorizationWithoutAuthenticationError,
     get_authorization_middleware,
+    handle_forbidden,
     handle_unauthorized,
 )
 from blacksheep.server.bindings import ControllerParameter
-from blacksheep.server.controllers import router as controllers_router
 from blacksheep.server.cors import CORSPolicy, CORSStrategy, get_cors_middleware
 from blacksheep.server.env import EnvironmentSettings
 from blacksheep.server.errors import ServerErrorDetailsHandler
+from blacksheep.server.files import DefaultFileOptions
 from blacksheep.server.files.dynamic import serve_files_dynamic
 from blacksheep.server.normalization import normalize_handler, normalize_middleware
+from blacksheep.server.process import use_shutdown_handler
 from blacksheep.server.responses import _ensure_bytes
 from blacksheep.server.routing import (
     MountRegistry,
     RegisteredRoute,
+    RouteMethod,
     Router,
     RoutesRegistry,
 )
-from blacksheep.server.websocket import WebSocket
+from blacksheep.server.routing import router as default_router
+from blacksheep.server.routing import validate_default_router, validate_router
+from blacksheep.server.websocket import WebSocket, format_reason
 from blacksheep.sessions import SessionMiddleware, SessionSerializer
 from blacksheep.settings.di import di_settings
 from blacksheep.utils import ensure_bytes, join_fragments
+from blacksheep.utils.meta import get_parent_file, import_child_modules
 
 
 def get_default_headers_middleware(
@@ -84,11 +94,17 @@ class ApplicationEvent:
         self.context = context
 
     def __iadd__(self, handler: Callable[..., Any]) -> "ApplicationEvent":
-        self._handlers.append(handler)
+        self._handlers.append(self._wrap_discard(handler))
         return self
 
     def __isub__(self, handler: Callable[..., Any]) -> "ApplicationEvent":
-        self._handlers.remove(handler)
+        to_remove = [
+            callback
+            for callback in self._handlers
+            if callback is handler or unwrap(callback) is handler
+        ]
+        for callback in to_remove:
+            self._handlers.remove(callback)
         return self
 
     def __len__(self) -> int:
@@ -105,9 +121,24 @@ class ApplicationEvent:
 
         return decorator
 
-    async def fire(self, *args: Any, **keywargs: Any) -> None:
+    async def fire(self, *args: Any, **kwargs: Any) -> None:
         for handler in self._handlers:
-            await handler(self.context, *args, **keywargs)
+            await handler(self.context, *args, **kwargs)
+
+    def _wrap_discard(self, function):
+        """
+        If the given function does not accept any parameter, returns a wrapper with a
+        discard parameter; otherwise returns the same function.
+        """
+        if len(signature(function).parameters) == 0:
+
+            @wraps(function)
+            async def wrap_handler(_):
+                await function()
+
+            return wrap_handler
+        else:
+            return function
 
 
 class ApplicationSyncEvent(ApplicationEvent):
@@ -126,7 +157,7 @@ class ApplicationSyncEvent(ApplicationEvent):
 
 
 class ApplicationStartupError(RuntimeError):
-    ...
+    """Base class for errors occurring when an application starts."""
 
 
 class ApplicationAlreadyStartedCORSError(TypeError):
@@ -135,13 +166,6 @@ class ApplicationAlreadyStartedCORSError(TypeError):
             "The application is already running, configure CORS rules "
             "before starting the application"
         )
-
-
-def _extend(obj, cls):
-    """Applies a mixin to an instance of a class."""
-    base_cls = obj.__class__
-    base_cls_name = obj.__class__.__name__
-    obj.__class__ = type(base_cls_name, (cls, base_cls), {})
 
 
 class Application(BaseApplication):
@@ -154,24 +178,21 @@ class Application(BaseApplication):
         *,
         router: Optional[Router] = None,
         services: Optional[ContainerProtocol] = None,
-        debug: bool = False,
-        show_error_details: Optional[bool] = None,
+        show_error_details: bool = False,
         mount: Optional[MountRegistry] = None,
     ):
         env_settings = EnvironmentSettings()
         if router is None:
-            router = Router()
+            router = default_router if env_settings.use_default_router else Router()
         if services is None:
             services = di_settings.get_default_container()
-        if show_error_details is None:
-            show_error_details = env_settings.show_error_details
         if mount is None:
             mount = MountRegistry(env_settings.mount_auto_events)
-        super().__init__(show_error_details, router)
+
+        super().__init__(show_error_details or env_settings.show_error_details, router)
 
         assert services is not None
         self._services: ContainerProtocol = services
-        self.debug = debug
         self.middlewares: List[Callable[..., Awaitable[Response]]] = []
         self._default_headers: Optional[Tuple[Tuple[str, str], ...]] = None
         self._middlewares_configured = False
@@ -183,12 +204,29 @@ class Application(BaseApplication):
         self.on_stop = ApplicationEvent(self)
         self.on_middlewares_configuration = ApplicationSyncEvent(self)
         self.started = False
-        self.controllers_router: RoutesRegistry = controllers_router
         self.files_handler = FilesHandler()
         self.server_error_details_handler = ServerErrorDetailsHandler()
         self._session_middleware: Optional[SessionMiddleware] = None
         self.base_path: str = ""
         self._mount_registry = mount
+
+        validate_router(self)
+        parent_file = get_parent_file()
+
+        if parent_file:
+            _auto_import_controllers(parent_file)
+            _auto_import_routes(parent_file)
+
+        if env_settings.add_signal_handler:
+            use_shutdown_handler(self)
+
+    @property
+    def controllers_router(self) -> RoutesRegistry:
+        return self.router.controllers_routes
+
+    @controllers_router.setter
+    def controllers_router(self, value) -> None:
+        self.router.controllers_routes = value
 
     @property
     def services(self) -> ContainerProtocol:
@@ -227,7 +265,7 @@ class Application(BaseApplication):
         If the child application is a BlackSheep application, it requires handling of
         its lifecycle events. This can be automatic, if the environment variable
 
-            APP_MOUNT_AUTO_EVENTS is set to "1" or "true" (case insensitive)
+            APP_MOUNT_AUTO_EVENTS is missing or set to "1" or "true" (case insensitive)
 
         or explicitly enabled, if the parent app's is configured this way:
 
@@ -413,22 +451,10 @@ class Application(BaseApplication):
             {  # type: ignore
                 AuthenticateChallenge: handle_authentication_challenge,
                 UnauthorizedError: handle_unauthorized,
+                ForbiddenError: handle_forbidden,
             }
         )
         return strategy
-
-    def route(
-        self, pattern: str, methods: Optional[Sequence[str]] = None
-    ) -> Callable[..., Any]:
-        if methods is None:
-            methods = ["GET"]
-
-        def decorator(f):
-            for method in methods:
-                self.router.add(method, pattern, f)
-            return f
-
-        return decorator
 
     def exception_handler(
         self, exception: Union[int, Type[Exception]]
@@ -443,6 +469,37 @@ class Application(BaseApplication):
 
         return decorator
 
+    def lifespan(self, callback):
+        """
+        Registers an async generator, or async context manager, to be entered at
+        application start, and exited at application shutdown. This is syntactic sugar
+        alternative to handling application start and stop events directly. It can be
+        useful to handle objects that need to be initialized and disposed, like HTTP
+        clients that use connection pools, or files that needs to be open following the
+        lifespan of the application.
+        """
+        if not hasattr(callback, "__aenter__"):
+            callback = asynccontextmanager(callback)
+
+        obj = None
+
+        @self.on_start
+        async def register_aenter(_):
+            nonlocal obj
+            try:
+                obj = callback(self)
+            except TypeError:
+                obj = callback()
+            await obj.__aenter__()
+
+        @self.on_stop
+        async def register_aexit(_):
+            nonlocal obj
+            if obj is not None:
+                await obj.__aexit__(None, None, None)
+
+        return callback
+
     def serve_files(
         self,
         source_folder: Union[str, Path],
@@ -454,6 +511,7 @@ class Application(BaseApplication):
         index_document: Optional[str] = "index.html",
         fallback_document: Optional[str] = None,
         allow_anonymous: bool = True,
+        default_file_options: Optional[DefaultFileOptions] = None,
     ):
         """
         Configures dynamic file serving from a given folder, relative to the server cwd.
@@ -473,6 +531,8 @@ class Application(BaseApplication):
             fallback_document: Optional file name, for a document to serve when a
             response would be otherwise 404 Not Found; e.g. use this to serve SPA that
             use HTML5 History API for client side routing.
+            default_file_options: Optional options to serve the default file
+            (index.html)
         """
         serve_files_dynamic(
             self.router,
@@ -485,6 +545,7 @@ class Application(BaseApplication):
             index_document=index_document,
             fallback_document=fallback_document,
             anonymous_access=allow_anonymous,
+            default_file_options=default_file_options,
         )
 
     def _apply_middlewares_in_routes(self):
@@ -547,6 +608,7 @@ class Application(BaseApplication):
                 route.method,
                 self.get_controller_handler_pattern(controller_type, route),
                 handler,
+                controller_type._filters_,
             )
         return controller_types
 
@@ -569,11 +631,11 @@ class Application(BaseApplication):
 
         self.router.sort_routes()
 
-        for route in self.router:
+        for method, route in self.router.iter_with_methods():
             if route.handler in configured_handlers:
                 continue
 
-            route.handler = normalize_handler(route, self.services)
+            route.handler = normalize_handler(route, self.services, method)
             configured_handlers.add(route.handler)
 
         self._normalize_fallback_route()
@@ -630,8 +692,11 @@ class Application(BaseApplication):
     def extend(self, mixin) -> None:
         """
         Extends the class with additional features, applying the given mixin class.
+
+        This method should be used for those scenarios where opting-in for a feature
+        incurs a performance fee, so that said fee is paid only when necessary.
         """
-        _extend(self, mixin)
+        extend(self, mixin)
 
     async def start(self):
         if self.started:
@@ -641,6 +706,7 @@ class Application(BaseApplication):
         if self.on_start:
             await self.on_start.fire()
 
+        validate_default_router()
         self.use_controllers()
         self.normalize_handlers()
         self.configure_middlewares()
@@ -652,7 +718,7 @@ class Application(BaseApplication):
         await self.on_stop.fire()
         self.started = False
 
-    async def _handle_lifespan(self, receive, send):
+    async def _handle_lifespan(self, receive, send) -> None:
         message = await receive()
         assert message["type"] == "lifespan.startup"
 
@@ -670,21 +736,35 @@ class Application(BaseApplication):
         await self.stop()
         await send({"type": "lifespan.shutdown.complete"})
 
-    async def _handle_websocket(self, scope, receive, send):
+    async def _handle_websocket(self, scope, receive, send) -> None:
         ws = WebSocket(scope, receive, send)
-        route = self.router.get_ws_match(scope["path"])
+        # TODO: support filters
+        route = self.router.get_match_by_method_and_path(
+            RouteMethod.GET_WS, scope["path"]
+        )
 
-        if route:
-            ws.route_values = route.values
-            try:
-                return await route.handler(ws)
-            except UnauthorizedError:
-                await ws.close(401, "Unauthorized")
-            except HTTPException as http_exception:
-                await ws.close(http_exception.status, str(http_exception))
-        await ws.close()
+        if route is None:
+            await ws.close()
+            return
 
-    async def _handle_http(self, scope, receive, send):
+        ws.route_values = route.values
+
+        try:
+            # The ASGI protocol does not allow to return any response, not even for the
+            # handshake HTTP request
+            await route.handler(ws)
+        except Exception as exc:
+            logging.exception("Exception while handling WebSocket")
+            # If WebSocket connection accepted, close
+            # the connection using WebSocket Internal error code.
+            if ws.accepted:
+                await ws.close(1011, reason=format_reason(str(exc)))
+            else:
+                # Otherwise, just close the connection, the ASGI server
+                # will anyway respond 403 to the client.
+                await ws.close()
+
+    async def _handle_http(self, scope, receive, send) -> None:
         assert scope["type"] == "http"
 
         request = Request.incoming(
@@ -755,7 +835,7 @@ class MountMixin:
             return await super()._handle_lifespan(receive, send)  # type: ignore
 
         for route in self.mount_registry.mounted_apps:  # type: ignore
-            route_match = route.match(scope["raw_path"])
+            route_match = route.match_by_path(scope["raw_path"])
             if route_match:
                 raw_path = scope["raw_path"]
                 if raw_path == route.pattern.rstrip(b"/*") and scope["type"] == "http":
@@ -764,3 +844,18 @@ class MountMixin:
                 return await route.handler(scope, receive, send)
 
         return await super().__call__(scope, receive, send)  # type: ignore
+
+
+def _auto_import(parent_file: str, folder_name):
+    parent_folder = Path(parent_file).parent
+    controllers_path = parent_folder / folder_name
+    if controllers_path.exists():
+        import_child_modules(controllers_path)
+
+
+def _auto_import_controllers(parent_file: str):
+    _auto_import(parent_file, "controllers")
+
+
+def _auto_import_routes(parent_file: str):
+    _auto_import(parent_file, "routes")

@@ -6,6 +6,8 @@ from blacksheep.messages import Request
 from blacksheep.server.asgi import get_full_path
 from blacksheep.settings.json import json_settings
 
+MAX_REASON_SIZE = 123
+
 
 class WebSocketState(Enum):
     CONNECTING = 0
@@ -62,10 +64,19 @@ class WebSocket(Request):
         self.scope = scope  # type: ignore
         self._receive = self._wrap_receive(receive)
         self._send = send
+        self._accepted = False
         self.route_values = {}
 
         self.client_state = WebSocketState.CONNECTING
         self.application_state = WebSocketState.CONNECTING
+
+    @property
+    def accepted(self) -> bool:
+        """
+        Returns a value indicating whether this WebSocket request was already accepted,
+        or if it is still in the HTTP handshake phase.
+        """
+        return self._accepted
 
     def __repr__(self):
         return f"<WebSocket {self.url.value.decode()}>"
@@ -83,11 +94,12 @@ class WebSocket(Request):
         self.client_state = WebSocketState.CONNECTED
 
     async def accept(
-        self, headers: Optional[List] = None, subprotocol: str = None
+        self, headers: Optional[List] = None, subprotocol: Optional[str] = None
     ) -> None:
         headers = headers or []
 
         await self._connect()
+        self._accepted = True
         self.application_state = WebSocketState.CONNECTED
 
         message = {
@@ -170,3 +182,18 @@ class WebSocket(Request):
 
     async def close(self, code: int = 1000, reason: Optional[str] = None) -> None:
         await self._send({"type": "websocket.close", "code": code, "reason": reason})
+
+
+def format_reason(reason: str) -> str:
+    """
+    Ensures that the close reason is no longer than the max reason size.
+    (https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/close#reason)
+    """
+    reason_bytes = reason.encode()
+
+    if len(reason_bytes) <= MAX_REASON_SIZE:
+        return reason
+
+    ellipsis_ = b"..."
+    truncated_reason = reason_bytes[: MAX_REASON_SIZE - len(ellipsis_)] + ellipsis_
+    return truncated_reason.decode()

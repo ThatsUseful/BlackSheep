@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import time
 from base64 import urlsafe_b64encode
 from urllib.parse import unquote
 from uuid import uuid4
@@ -8,11 +9,12 @@ from uuid import uuid4
 import pytest
 import websockets
 import yaml
-from websockets.exceptions import InvalidStatusCode
+from requests.exceptions import ReadTimeout
+from websockets.exceptions import ConnectionClosedError, InvalidStatusCode
 
 from .client_fixtures import get_static_path
 from .server_fixtures import *  # NoQA
-from .utils import assert_files_equals, ensure_success
+from .utils import assert_files_equals, ensure_success, get_test_files_url, temp_file
 
 
 def test_hello_world(session_1):
@@ -300,7 +302,45 @@ def test_get_file_with_bytesio(session_1):
     ensure_success(response)
 
     text = response.text
-    assert text == """some initial binary data: """
+    assert text == "some initial binary data: "
+
+
+def test_get_is_disconnected_waiting(session_1):
+    response = session_1.get(
+        "/check-disconnected", params={"expect_disconnected": "false"}
+    )
+    ensure_success(response)
+
+    text = response.text
+    assert text == "OK"
+
+
+def test_get_is_disconnected_cancelling(session_1):
+    with temp_file(".is-disconnected.txt") as check_file:
+        try:
+            session_1.get(
+                "/check-disconnected",
+                params={"expect_disconnected": "true"},
+                timeout=0.005,
+            )
+        except ReadTimeout:
+            # wait 310 ms and check a file written by the server after asserting the request
+            # was disconnected
+            time.sleep(0.31)
+
+        try:
+            text = check_file.read_text()
+            assert text == "The connection was disconnected"
+        except FileNotFoundError:
+            pytest.fail("The server did not write the file .is-disconnected.txt")
+
+
+def test_receive_is_accessible_from_python(session_1):
+    response = session_1.get("/read-asgi-receive")
+    ensure_success(response)
+
+    text = response.text
+    assert text == "OK"
 
 
 def test_xml_files_are_not_served(session_1):
@@ -328,7 +368,7 @@ def test_requires_authenticated_user(session_2, claims, expected_status):
     "claims,expected_status",
     [
         (None, 401),
-        ({"id": "001", "name": "Charlie Brown", "role": "user"}, 401),
+        ({"id": "001", "name": "Charlie Brown", "role": "user"}, 403),
         (
             {
                 "id": "002",
@@ -360,30 +400,32 @@ def test_open_api_ui(session_2):
         == """
 <!DOCTYPE html>
 <html>
-<head>
+  <head>
     <title>Cats API</title>
-    <link rel="icon" href="/favicon.png"/>
-    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3.30.0/swagger-ui.css">
-</head>
-<body>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.png" />
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
+  </head>
+  <body>
     <div id="swagger-ui"></div>
-    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@3.30.0/swagger-ui-bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
     <script>
-    const ui = SwaggerUIBundle({
-        url: '/openapi.json',
-        oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect',
-        dom_id: '#swagger-ui',
+      const ui = SwaggerUIBundle({
+        url: "/openapi.json",
+        oauth2RedirectUrl: window.location.origin + "/docs/oauth2-redirect",
+        dom_id: "#swagger-ui",
         presets: [
-            SwaggerUIBundle.presets.apis,
-            SwaggerUIBundle.SwaggerUIStandalonePreset
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIBundle.SwaggerUIStandalonePreset
         ],
         layout: "BaseLayout",
         deepLinking: true,
         showExtensions: true,
         showCommonExtensions: true
-    })
+      });
     </script>
-</body>
+  </body>
 </html>
 """.strip()
     )
@@ -401,10 +443,10 @@ def test_open_api_redoc_ui(session_2):
 <html>
   <head>
     <title>Cats API</title>
-    <meta charset="utf-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" href="/favicon.png"/>
-    <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.png" />
+    <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet" />
     <style>
       body {
         margin: 0;
@@ -414,7 +456,80 @@ def test_open_api_redoc_ui(session_2):
   </head>
   <body>
     <redoc spec-url="/openapi.json"></redoc>
-    <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js"> </script>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js"></script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+def test_open_api_ui_custom_cdn(session_4):
+    response = session_4.get("/docs")
+
+    assert response.status_code == 200
+    text = response.text
+    assert (
+        text.strip()
+        == f"""
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Cats API</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.png" />
+    <link type="text/css" rel="stylesheet" href="{get_test_files_url("swag-css")}" />
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="{get_test_files_url("swag-js")}"></script>
+    <script>
+      const ui = SwaggerUIBundle({{
+        url: "/openapi.json",
+        oauth2RedirectUrl: window.location.origin + "/docs/oauth2-redirect",
+        dom_id: "#swagger-ui",
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIBundle.SwaggerUIStandalonePreset
+        ],
+        layout: "BaseLayout",
+        deepLinking: true,
+        showExtensions: true,
+        showCommonExtensions: true
+      }});
+    </script>
+  </body>
+</html>
+""".strip()
+    )
+
+
+def test_open_api_redoc_ui_custom_cdn(session_4):
+    response = session_4.get("/redocs")
+
+    assert response.status_code == 200
+    text = response.text
+    assert (
+        text.strip()
+        == f"""
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Cats API</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.png" />
+    <link href="{get_test_files_url("redoc-fonts")}" rel="stylesheet" />
+    <style>
+      body {{
+        margin: 0;
+        padding: 0;
+      }}
+    </style>
+  </head>
+  <body>
+    <redoc spec-url="/openapi.json"></redoc>
+    <script src="{get_test_files_url("redoc-js")}"></script>
   </body>
 </html>
 """.strip()
@@ -793,7 +908,7 @@ async def test_websocket(server_host, server_port_4, route, data):
     "route",
     [
         "websocket-echo-text-auth",
-        "websocket-echo-text-http-exp",
+        "websocket-error-before-accept",
     ],
 )
 async def test_websocket_auth(server_host, server_port_2, route):
@@ -805,3 +920,16 @@ async def test_websocket_auth(server_host, server_port_2, route):
 
     assert error.value.status_code == 403
     assert "server rejected" in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_websocket_server_error(server_host, server_port_2):
+    uri = f"ws://{server_host}:{server_port_2}/websocket-server-error"
+
+    with pytest.raises(ConnectionClosedError) as error:
+        async with websockets.connect(uri) as ws:
+            async for _message in ws:
+                pass
+
+    assert error.value.code == 1011
+    assert error.value.reason == "Server error"

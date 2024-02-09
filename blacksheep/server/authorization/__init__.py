@@ -24,7 +24,7 @@ __all__ = (
 def auth(
     policy: Optional[str] = "authenticated",
     *,
-    authentication_schemes: Optional[Sequence[str]] = None
+    authentication_schemes: Optional[Sequence[str]] = None,
 ) -> Callable[..., Any]:
     """
     Configures authorization for a decorated request handler, optionally with a policy.
@@ -111,4 +111,14 @@ async def handle_unauthorized(
         401,
         [www_authenticate] if www_authenticate else None,
         content=TextContent("Unauthorized"),
+    )
+
+
+async def handle_forbidden(
+    app: Any, request: Request, http_exception: UnauthorizedError
+):
+    return Response(
+        403,
+        None,
+        content=TextContent("Forbidden"),
     )

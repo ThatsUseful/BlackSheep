@@ -322,9 +322,9 @@ async def test_controller_conventional_view_name_extraneous_function(home_model)
 @pytest.mark.parametrize(
     "value,expected_name",
     [
-        ("index", "index.html"),
-        ("index.html", "index.html"),
-        ("default", "default.html"),
+        ("index", "index.jinja"),
+        ("index.jinja", "index.jinja"),
+        ("default", "default.jinja"),
     ],
 )
 def test_template_name(value, expected_name):

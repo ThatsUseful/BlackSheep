@@ -1,21 +1,25 @@
+import asyncio
 import http
 import re
 from datetime import datetime, timedelta
 from json.decoder import JSONDecodeError
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlencode
 
-try:
-    import cchardet as chardet
-except ImportError:
-    import chardet
+import charset_normalizer
 
 from blacksheep.multipart import parse_multipart
 from blacksheep.sessions import Session
 from blacksheep.settings.json import json_settings
+from blacksheep.utils.time import utcnow
 
-from .contents cimport Content, multiparts_to_dictionary, parse_www_form_urlencoded
+from .contents cimport (
+    ASGIContent,
+    Content,
+    multiparts_to_dictionary,
+    parse_www_form_urlencoded,
+)
 from .cookies cimport Cookie, parse_cookie, split_value, write_cookie_for_response
-from .exceptions cimport BadRequest, BadRequestFormat
+from .exceptions cimport BadRequest, BadRequestFormat, MessageAborted
 from .headers cimport Headers
 from .url cimport URL, build_absolute_url
 
@@ -29,17 +33,35 @@ cpdef str parse_charset(bytes value):
     return None
 
 
+async def _read_stream(request):
+    async for _ in request.content.stream():  # type: ignore
+        pass
+
+
+async def _call_soon(coro):
+    """
+    Returns the output of a coroutine if its result is immediately available,
+    otherwise None.
+    """
+    task = asyncio.create_task(coro)
+    asyncio.get_event_loop().call_soon(task.cancel)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        return None
+
+
 cdef class Message:
 
     def __init__(self, list headers):
-        self.__headers = headers or []
+        self._raw_headers = headers or []
 
     @property
     def headers(self):
         cdef str key = '_headers'
         if key in self.__dict__:
             return self.__dict__[key]
-        self.__dict__[key] = Headers(self.__headers)
+        self.__dict__[key] = Headers(self._raw_headers)
         return self.__dict__[key]
 
     cpdef Message with_content(self, Content content):
@@ -49,7 +71,7 @@ cdef class Message:
     cpdef bytes get_first_header(self, bytes key):
         cdef tuple header
         key = key.lower()
-        for header in self.__headers:
+        for header in self._raw_headers:
             if header[0].lower() == key:
                 return header[1]
 
@@ -57,16 +79,30 @@ cdef class Message:
         cdef list results = []
         cdef tuple header
         key = key.lower()
-        for header in self.__headers:
+        for header in self._raw_headers:
             if header[0].lower() == key:
                 results.append(header[1])
         return results
+
+    cdef void init_prop(self, str name, object value):
+        """
+        This method is for internal use and only accessible in Cython.
+        It initializes a new property on the request object, for rare scenarios
+        where an additional property can be useful. It would also be possible
+        to use a weakref.WeakKeyDictionary to store additional information
+        about request objects when useful, but for simplicity this method uses
+        the object __dict__.
+        """
+        try:
+            getattr(self, name)
+        except AttributeError:
+            setattr(self, name, value)
 
     cdef list get_headers_tuples(self, bytes key):
         cdef list results = []
         cdef tuple header
         key = key.lower()
-        for header in self.__headers:
+        for header in self._raw_headers:
             if header[0].lower() == key:
                 results.append(header)
         return results
@@ -83,22 +119,22 @@ cdef class Message:
         cdef tuple header
         cdef list to_remove = []
         key = key.lower()
-        for header in self.__headers:
+        for header in self._raw_headers:
             if header[0].lower() == key:
                 to_remove.append(header)
 
         for header in to_remove:
-            self.__headers.remove(header)
+            self._raw_headers.remove(header)
 
     cdef void remove_headers(self, list headers):
         cdef tuple header
         for header in headers:
-            self.__headers.remove(header)
+            self._raw_headers.remove(header)
 
     cdef bint _has_header(self, bytes key):
         cdef bytes existing_key, existing_value
         key = key.lower()
-        for existing_key, existing_value in self.__headers:
+        for existing_key, existing_value in self._raw_headers:
             if existing_key.lower() == key:
                 return True
         return False
@@ -107,18 +143,18 @@ cdef class Message:
         return self._has_header(key)
 
     cdef void _add_header(self, bytes key, bytes value):
-        self.__headers.append((key, value))
+        self._raw_headers.append((key, value))
 
     cdef void _add_header_if_missing(self, bytes key, bytes value):
         if not self._has_header(key):
-            self.__headers.append((key, value))
+            self._raw_headers.append((key, value))
 
     cpdef void add_header(self, bytes key, bytes value):
-        self.__headers.append((key, value))
+        self._raw_headers.append((key, value))
 
     cpdef void set_header(self, bytes key, bytes value):
         self.remove_header(key)
-        self.__headers.append((key, value))
+        self._raw_headers.append((key, value))
 
     cpdef bytes content_type(self):
         if self.content and self.content.type:
@@ -153,8 +189,8 @@ cdef class Message:
                 try:
                     return body.decode('ISO-8859-1')
                 except UnicodeDecodeError:
-                    # fallback to chardet;
-                    return body.decode(chardet.detect(body)['encoding'])
+                    # fallback to trying to detect the encoding;
+                    return body.decode(charset_normalizer.detect(body)['encoding'])
 
     async def form(self):
         cdef str text
@@ -270,7 +306,7 @@ cdef class Request(Message):
         list headers
     ):
         cdef URL _url = URL(url) if url else None
-        self.__headers = headers or []
+        self._raw_headers = headers or []
         self.method = method
         self._url = _url
         self._session = None
@@ -327,7 +363,16 @@ cdef class Request(Message):
 
     @property
     def base_path(self) -> str:
-        return self.__dict__.get("base_path", "")
+        # 1. if a base path was explicitly set, use it
+        # 2. if a root_path is set in the ASGI scope, use it
+        # 3. default to empty string otherwise
+        try:
+            return self.__dict__["base_path"]
+        except KeyError:
+            try:
+                return self.scope.get("root_path", "")
+            except AttributeError:
+                return ""
 
     @base_path.setter
     def base_path(self, value: str):
@@ -375,8 +420,15 @@ cdef class Request(Message):
     @property
     def query(self):
         if self._raw_query:
-            return parse_qs(self._raw_query.decode('utf8'))
+            return parse_qs(self._raw_query.decode("utf8"))
         return {}
+
+    @query.setter
+    def query(self, value):
+        cdef bytes raw_query
+        raw_query = urlencode(value, True).encode("utf8")
+        self._raw_query = raw_query
+        self.url = self.url.with_query(raw_query)
 
     @property
     def url(self):
@@ -460,7 +512,7 @@ cdef class Request(Message):
         if existing_cookie:
             self.set_header(b"cookie", existing_cookie + b";" + new_value)
         else:
-            self.__headers.append((b"cookie", new_value))
+            self._raw_headers.append((b"cookie", new_value))
 
     @property
     def etag(self):
@@ -477,6 +529,25 @@ cdef class Request(Message):
             return True
         return False
 
+    async def is_disconnected(self):
+        if not isinstance(self.content, ASGIContent):
+            raise TypeError(
+                "This method is only supported when a request is bound to "
+                "an instance of ASGIContent and to an ASGI "
+                "request/response cycle."
+            )
+
+        self.init_prop("_is_disconnected", False)
+        if self._is_disconnected is True:
+            return True
+
+        try:
+            await _call_soon(_read_stream(self))
+        except MessageAborted:
+            self._is_disconnected = True
+
+        return self._is_disconnected
+
 
 cdef class Response(Message):
 
@@ -486,7 +557,7 @@ cdef class Response(Message):
         list headers = None,
         Content content = None
     ):
-        self.__headers = headers or []
+        self._raw_headers = headers or []
         self.status = status
         self.content = content
 
@@ -528,7 +599,7 @@ cdef class Response(Message):
         return None
 
     def set_cookie(self, Cookie cookie):
-        self.__headers.append((b'set-cookie', write_cookie_for_response(cookie)))
+        self._raw_headers.append((b'set-cookie', write_cookie_for_response(cookie)))
 
     def set_cookies(self, list cookies):
         cdef Cookie cookie
@@ -540,7 +611,7 @@ cdef class Response(Message):
             Cookie(
                 name,
                 '',
-                datetime.utcnow() - timedelta(days=365)
+                utcnow() - timedelta(days=365)
             )
         )
 

@@ -17,7 +17,6 @@ from openapidocs.v3 import Schema
 from pydantic import BaseModel
 
 from blacksheep import Response, TextContent, WebSocket
-from blacksheep.exceptions import BadRequest
 from blacksheep.server import Application
 from blacksheep.server.authentication import AuthenticationHandler
 from blacksheep.server.authorization import Policy, Requirement, auth
@@ -29,6 +28,7 @@ from blacksheep.server.bindings import (
     FromQuery,
     FromServices,
 )
+from blacksheep.server.compression import use_gzip_compression
 from blacksheep.server.controllers import APIController
 from blacksheep.server.openapi.common import (
     ContentInfo,
@@ -48,6 +48,7 @@ from itests.utils import CrashTest
 
 app_2 = Application()
 
+use_gzip_compression(app_2)
 
 controllers_router = RoutesRegistry()
 app_2.controllers_router = controllers_router
@@ -148,9 +149,15 @@ async def echo_text_admin_users(websocket: WebSocket):
         await websocket.send_text(msg)
 
 
-@app_2.router.ws("/websocket-echo-text-http-exp")
+@app_2.router.ws("/websocket-error-before-accept")
 async def echo_text_http_exp(websocket: WebSocket):
-    raise BadRequest("Example")
+    raise RuntimeError("Error before accept")
+
+
+@app_2.router.ws("/websocket-server-error")
+async def websocket_server_error(websocket: WebSocket):
+    await websocket.accept()
+    raise RuntimeError("Server error")
 
 
 @auth("authenticated")
@@ -159,12 +166,12 @@ async def only_for_authenticated_users():
     return None
 
 
-@app_2.route("/crash")
+@app_2.router.route("/crash")
 async def crash():
     raise CrashTest()
 
 
-@app_2.route("/handled-crash")
+@app_2.router.route("/handled-crash")
 async def handled_crash():
     raise HandledException()
 

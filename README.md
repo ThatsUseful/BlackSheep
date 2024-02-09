@@ -24,18 +24,35 @@ pip install blacksheep
 ```python
 from datetime import datetime
 
-from blacksheep import Application
+from blacksheep import Application, get
 
 
 app = Application()
 
-@app.route("/")
+@get("/")
 async def home():
     return f"Hello, World! {datetime.utcnow().isoformat()}"
 
 ```
 
-## Getting started
+## Getting started using the CLI ✨
+
+BlackSheep offers a CLI to bootstrap new projects rapidly.
+To try it, first install the `blacksheep-cli` package:
+
+```bash
+pip install blacksheep-cli
+```
+
+Then use the `blacksheep create` command to bootstrap a project
+using one of the supported templates.
+
+![blacksheep create command](https://gist.githubusercontent.com/RobertoPrevato/38a0598b515a2f7257c614938843b99b/raw/67d15ba337de94c2f50d980a7b8924a747259254/blacksheep-create-demo.gif)
+
+The CLI includes a help, and supports custom templates, using the
+same sources supported by `Cookiecutter`.
+
+## Getting started with the documentation
 
 The documentation offers getting started tutorials:
 * [Getting started:
@@ -88,7 +105,7 @@ here](https://www.neoteroi.dev/blacksheep/requests/).
 ```python
 from dataclasses import dataclass
 
-from blacksheep import Application, FromJSON, FromQuery
+from blacksheep import Application, FromJSON, FromQuery, get, post
 
 
 app = Application()
@@ -99,21 +116,21 @@ class CreateCatInput:
     name: str
 
 
-@app.router.post("/api/cats")
+@post("/api/cats")
 async def example(data: FromJSON[CreateCatInput]):
     # in this example, data is bound automatically reading the JSON
     # payload and creating an instance of `CreateCatInput`
     ...
 
 
-@app.router.get("/:culture_code/:area")
+@get("/:culture_code/:area")
 async def home(culture_code, area):
     # in this example, both parameters are obtained from routes with
     # matching names
     return f"Request for: {culture_code} {area}"
 
 
-@app.router.get("/api/products")
+@get("/api/products")
 def get_products(
     page: int = 1,
     size: int = 30,
@@ -126,7 +143,7 @@ def get_products(
     ...
 
 
-@app.router.get("/api/products2")
+@get("/api/products2")
 def get_products2(
     page: FromQuery[int] = FromQuery(1),
     size: FromQuery[int] = FromQuery(30),
@@ -164,13 +181,13 @@ app.use_authorization()\
 
 
 @auth("admin")
-@app.router.get("/")
+@get("/")
 async def only_for_admins():
     ...
 
 
 @auth()
-@app.router.get("/")
+@get("/")
 async def only_for_authenticated_users():
     ...
 ```
@@ -186,7 +203,8 @@ Meaning that it is easy to integrate with services such as:
 * [Azure Active Directory B2C](https://docs.microsoft.com/en-us/azure/active-directory-b2c/overview)
 * [Okta](https://www.okta.com)
 
-Refer to the documentation for more details and examples.
+Refer to the documentation and to [BlackSheep-Examples](https://github.com/Neoteroi/BlackSheep-Examples)
+for more details and examples.
 
 ## Web framework features
 
@@ -197,6 +215,7 @@ Refer to the documentation for more details and examples.
   methods](https://www.neoteroi.dev/blacksheep/controllers/)
 * [Middlewares](https://www.neoteroi.dev/blacksheep/middlewares/)
 * [WebSocket](https://www.neoteroi.dev/blacksheep/websocket/)
+* [Server-Sent Events (SSE)](https://www.neoteroi.dev/blacksheep/server-sent-events/)
 * [Built-in support for dependency
   injection](https://www.neoteroi.dev/blacksheep/dependency-injection/)
 * [Support for automatic binding of route and query parameters to request
@@ -243,8 +262,6 @@ from blacksheep.client import ClientSession
 async def client_example():
     async with ClientSession() as client:
         response = await client.get("https://docs.python.org/3/")
-
-        assert response is not None
         text = await response.text()
         print(text)
 
@@ -265,6 +282,5 @@ Please refer to the [documentation website](https://www.neoteroi.dev/blacksheep/
 [BlackSheep community in Gitter](https://gitter.im/Neoteroi/BlackSheep).
 
 ## Branches
-The _main_ branch contains the currently developed version, which is version 2
-alpha. The _v1_ branch contains version 1 of the web framework, for bugs fixes
+The _main_ branch contains the currently developed version, which is version 2. The _v1_ branch contains version 1 of the web framework, for bugs fixes
 and maintenance.

@@ -8,7 +8,6 @@ from functools import wraps
 from typing import Any, Dict, List, Optional, TypeVar
 from uuid import UUID, uuid4
 
-import pkg_resources
 import pytest
 from guardpost import AuthenticationHandler, Identity, User
 from openapidocs.v3 import Info
@@ -36,7 +35,9 @@ from blacksheep.server.bindings import (
 from blacksheep.server.di import di_scope_middleware
 from blacksheep.server.normalization import ensure_response
 from blacksheep.server.openapi.v3 import OpenAPIHandler
+from blacksheep.server.resources import get_resource_file_path
 from blacksheep.server.responses import status_code, text
+from blacksheep.server.routing import Router, SharedRouterError
 from blacksheep.server.security.hsts import HSTSMiddleware
 from blacksheep.testing.helpers import get_example_scope
 from blacksheep.testing.messages import MockReceive, MockSend
@@ -65,9 +66,7 @@ class Foo:
 
 def read_multipart_mix_dat():
     with open(
-        pkg_resources.resource_filename(
-            __name__, os.path.join("res", "multipart-mix.dat")
-        ),
+        get_resource_file_path("tests", os.path.join("res", "multipart-mix.dat")),
         mode="rb",
     ) as dat_file:
         return dat_file.read()
@@ -406,7 +405,7 @@ async def test_application_middlewares_as_classes(app):
             self.calls.append(self.get_seed())
             return response
 
-    @app.route("/")
+    @app.router.route("/")
     async def example(request):
         nonlocal calls
         calls.append(5)
@@ -568,8 +567,8 @@ async def test_application_post_multipart_formdata_files_handler(app):
         # NB: in this example; we save files to output folder and verify
         # that their binaries are identical
         for part in files:
-            full_path = pkg_resources.resource_filename(
-                __name__, "out/" + part.file_name.decode()
+            full_path = get_resource_file_path(
+                "tests", f"out/{part.file_name.decode()}"
             )
             with open(full_path, mode="wb") as saved_file:
                 saved_file.write(part.data)
@@ -588,7 +587,7 @@ async def test_application_post_multipart_formdata_files_handler(app):
     rel_path = "files/"
 
     for file_name in file_names:
-        full_path = pkg_resources.resource_filename(__name__, rel_path + file_name)
+        full_path = get_resource_file_path("tests", f"{rel_path}{file_name}")
         with open(full_path, mode="rb") as source_file:
             binary = source_file.read()
             lines += [
@@ -624,8 +623,8 @@ async def test_application_post_multipart_formdata_files_handler(app):
 
     # now files are in both folders: compare to ensure they are identical
     for file_name in file_names:
-        full_path = pkg_resources.resource_filename(__name__, rel_path + file_name)
-        copy_full_path = pkg_resources.resource_filename(__name__, "./out/" + file_name)
+        full_path = get_resource_file_path("tests", f"{rel_path}{file_name}")
+        copy_full_path = get_resource_file_path("tests", f"out/{file_name}")
 
         with open(full_path, mode="rb") as source_file:
             binary = source_file.read()
@@ -3496,7 +3495,7 @@ async def test_default_headers(app):
 
     assert app.default_headers == (("Example", "Foo"),)
 
-    @app.route("/")
+    @app.router.route("/")
     async def home():
         return text("Hello World")
 
@@ -4090,7 +4089,7 @@ async def test_pep_593(app):
         age: int | None
 
     @app.router.get("/pets")
-    def pets() -> list[Pet]:
+    def pets() -> List[Pet]:
         return [
             Pet(name="Ren", age=None),
             Pet(name="Stimpy", age=3),
@@ -4108,3 +4107,75 @@ async def test_pep_593(app):
         {"name": "Ren", "age": None},
         {"name": "Stimpy", "age": 3},
     ]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_event(app: Application):
+    initialized = False
+    disposed = False
+
+    @app.lifespan
+    async def some_async_gen():
+        nonlocal initialized
+        nonlocal disposed
+
+        initialized = True
+        yield
+        disposed = True
+
+    await app.start()
+
+    assert initialized is True
+    assert disposed is False
+
+    await app.stop()
+
+    assert initialized is True
+    assert disposed is True
+
+
+def test_mounting_apps_using_the_same_router_raises_error():
+    # Recreates the scenario happening when the default singleton router is used for
+    # both parent app and child app
+    # https://github.com/Neoteroi/BlackSheep/issues/443
+    single_router = Router()
+    Application(router=single_router)
+
+    with pytest.raises(SharedRouterError):
+        Application(router=single_router)
+
+
+@pytest.mark.asyncio
+async def test_application_sub_router_normalization():
+    router = Router()
+    app = FakeApplication(router=Router(sub_routers=[router]))
+
+    # https://github.com/Neoteroi/BlackSheep/issues/466
+    @dataclass
+    class Person:
+        id: Optional[int] = None
+        name: str = ""
+
+    @router.post("/")
+    async def hello(request: Request, p: Person):
+        return f"{request.client_ip}:Hello, {p.name}!"
+
+    content = b'{"id": 1, "name": "Charlie Brown"}'
+
+    await app.start()
+    await app(
+        get_example_scope(
+            "POST",
+            "/",
+            [
+                (b"content-length", str(len(content)).encode()),
+                (b"content-type", b"application/json"),
+            ],
+        ),
+        MockReceive([content]),
+        MockSend(),
+    )
+
+    response = app.response
+    assert response is not None
+    assert response.status == 200

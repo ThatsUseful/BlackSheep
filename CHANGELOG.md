@@ -5,6 +5,226 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.6] - 2024-01-17 :kr: :heart:
+
+- Adds built-in support for [Server-Sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events).
+- Adds a function to detect when the server process is terminating because it
+  received a `SIGINT` or a `SIGTERM` command
+  (`from blacksheep.server.process import is_stopping`).
+- Adds support for request handler normalization for methods defined as
+  asynchronous generators. This feature is enabled by default only for
+  ServerSentEvents, but can be configured for user defined types.
+- Raises exception when the default router is used to register routes, but not
+  associated to an application object. Fixes [#470](https://github.com/Neoteroi/BlackSheep/issues/470).
+
+Refer to the [BlackSheep documentation](https://www.neoteroi.dev/blacksheep/server-sent-events/)
+and to the [examples repository](https://github.com/Neoteroi/BlackSheep-Examples/tree/main/server-sent-events) for more information on server-sent events support.
+
+## [2.0.5] - 2024-01-12 :pie:
+
+- Fixes [#466](https://github.com/Neoteroi/BlackSheep/issues/466), regression
+  introduced in 2.0.4 when using sub-routers, reported by @ruancan.
+
+## [2.0.4] - 2023-12-31 :fireworks:
+
+- Adds a `is_disconnected()` method to the `Request` class, similar to the one
+  available in `Starlette`, which answers if the ASGI server published an
+  `http.disconnected` message for a request.
+  Feature requested by @netanel-haber in [#452](https://github.com/Neoteroi/BlackSheep/issues/452).
+- Makes the `receive` callable of the `ASGI` request accessible to Python code,
+  through the existing `ASGIContent` class. The `receive` property was already
+  included in `contents.pyi` file and it was wrong to keep `receive` private
+  for Cython code.
+- Removes `consts.pxi` because it used a deprecated Cython feature.
+- Upgrades the versions of Hypercorn and uvicorn for integration tests.
+- Removes the unused "active" property defined in the `Response` class.
+- Fixes #455, reported by @Klavionik. This error caused the WebSocket handler
+  to erroneously return an instance of BlackSheep response to the underlying
+  ASGI server, causing an error to be logged in the console.
+- Updates type annotations in the `Application` class code to be more explicit
+  about the fact that certain methods must return None (return in __call__ is
+  used to interrupt code execution and not to return objects).
+- Improves the normalization logic to not normalize the output for WebSocket
+  requests (as ASGI servers do not allow controlling the response for WebSocket
+  handshake requests).
+- Improves the normalization logic to not normalize request handlers that are
+  valid as they are, as asynchronous functions with a single parameter
+  annotated as Request or WebSocket.
+- Fixes #421 reported by @mohd-akram, causing handled exceptions to be logged
+  like unhandled, when defining exception handlers using subclasses.
+- Removes wrong type annotations in two functions in `blacksheep.utils`.
+
+## [2.0.3] - 2023-12-18 :gift:
+
+- Fixes #450, about missing `Access-Control-Allow-Credentials` response header
+  in CORS responses after successful pre-flight requests. Reported by @waweber
+
+## [2.0.2] - 2023-12-15 :christmas_tree:
+
+- Upgrades default SwaggerUI files to version 5, by @sinisaos
+- Fixes #427, handling WebSocket errors according to ASGI specification, by @Klavionik
+- Adds support for custom files URLs for ReDoc and Swagger UI, by @joshua-auchincloss
+
+## [2.0.1] - 2023-12-09 :mount_fuji:
+
+- Fixes #441 causing the `refresh_token` endpoint for OpenID Connect
+  integrations to not work when authentication is required by default.
+- Fixes #443, raising a detailed exception when more than one application is
+  sharing the same instance of `Router`
+- Fixes #438 and #436, restoring support for `uvicorn` used programmatically
+  and reloading the application object more than once in the same process.
+
+## [2.0.0] - 2023-11-18 :mage_man:
+
+- Releases v2 as stable.
+- Removes the `route` method from the `Application` class, and move it to the
+  `Router` class to be consistent with other methods to register request
+  handlers.
+- Removes `ClientConnectionPool` and `ClientConnectionPools` aliases.
+
+## [2.0a12] - 2023-11-17 :fallen_leaf:
+
+- Adds support for Python 3.12, by @bymoye
+- Replaces `pkg_resources` with `importlib.resources` for all supported Python
+  versions except for `3.8`.
+- Runs tests against Pydantic `2.4.2` instead of Pydantic `2.0` to check
+  support for Pydantic v2.
+- Upgrades dependencies.
+- Adds `.webp` and `.webm` to the list of extensions of files that are served
+  by default.
+
+## [2.0a11] - 2023-09-19 :warning:
+
+- Resolves bug in `2.0a10` caused by incompatibility issue with `Cython 3`.
+- Pins `Cython` to `3.0.2` in the build job.
+
+## [2.0a10] - 2023-08-21 :broccoli:
+
+- Add support for `.jinja` extension by @thearchitector.
+- Makes the `.jinja` extension default for Jinja templates.
+
+## [2.0a9] - 2023-07-14
+
+- Fixes bug #394, causing the `Content` max body size to be 2147483647.
+  (C int max value). Reported and fixed by @thomafred.
+
+## [2.0a8] - 2023-07-02
+
+- Add support for `StreamedContent` with specific content length; fixing
+  [#374](https://github.com/Neoteroi/BlackSheep/issues/374) both on the client
+  and the server side.
+- Fix [#373](https://github.com/Neoteroi/BlackSheep/issues/373), about missing
+  closing ASGI message when an async generator does not yield a closing empty
+  bytes sequence (`b""`).
+- Make version dynamic in `pyproject.toml`, simplifying how the version can be
+  queried at runtime (see [#362](https://github.com/Neoteroi/BlackSheep/issues/362)).
+- Fix [#372](https://github.com/Neoteroi/BlackSheep/issues/372). Use the ASGI
+  scope `root_path` when possible, as `base_path`.
+- Fix [#371](https://github.com/Neoteroi/BlackSheep/issues/371). Returns status
+  403 Forbidden when the user is authenticated but not authorized to perform an
+  action.
+- Fixes `TypeError` when writing a request without host header.
+- Add support for `Pydantic` `v2`: meaning feature parity with support for
+  Pydantic v1 (generating OpenAPI Documentation).
+- Add support for `Union` types in sub-properties of request handlers input and
+  output types, for generating OpenAPI Documentation, both using simple classes
+  and Pydantic [#389](https://github.com/Neoteroi/BlackSheep/issues/389)
+
+## [2.0a7] - 2023-05-31 :corn:
+
+- Fixes bug in CORS handling when [multiple origins are
+  allowed](https://github.com/Neoteroi/BlackSheep/issues/364).
+- Adds a `Vary: Origin` response header for CORS requests when the value of
+  `Access-Control-Allow-Origin` header is a specific URL.
+- Adds algorithms parameter to JWTBearerAuthentication constructor, by @tyzhnenko.
+- Improves the code API to define security definitions in OpenAPI docs, by @tyzhnenko.
+- Applies a correction to the auto-import function for routes and controllers.
+
+## [2.0a6] - 2023-04-28 :crown:
+
+- Adds support for automatic import of modules defined under `controllers` and
+  `routes` packages, relatively to where the `Application` class is
+  instantiated. Fix #334.
+- Adds a `GzipMiddleware` that can be used to enable `gzip` compression, using
+  the built-in module. Contributed by @tyzhnenko :sparkles:
+- Improves how tags are generated for OpenAPI Documentation: adds the
+  possibility to document tags explicitly and control their order, otherwise
+  sorts them alphabetically by default, when using controllers or specifying
+  tags for routes. Contributed by @tyzhnenko :sparkles:
+- Adds a strategy to control features depending on application environment:
+  `is_development`, `is_production` depending on `APP_ENV` environment
+  variable. For more information, see [_Defining application
+  environment_](https://www.neoteroi.dev/blacksheep/settings/#defining-application-environment).
+- Makes the client `ConnectionPools` a context manager, its `__exit__` method
+  closes all its `TCP-IP` connections.
+- Improves exception handling so it is possible to specify how specific types
+  of `HTTPException` must be handled (#342).
+- Improves the error message when a list of objects if expected for an incoming
+  request body, and a non-list value is received (#341).
+- Replaces `chardet` and `cchardet` with `charset-normalizer`. Contributed by
+  @mementum.
+- Upgrades all dependencies.
+- Adopts `pyproject.toml`.
+
+## [2.0a5] - 2023-04-02 :fish:
+
+- Adds support for user defined filters for server routes (`RouteFilter` class).
+- Adds built-in support for routing based on request headers.
+- Adds built-in support for routing based on request query parameters.
+- Adds built-in support for routing based on host header value.
+- Adds a `query.setter` to the `Request` class, to set queries using
+  `dict[str, str | sequence[str]]` as input.
+- The functions registered to application events don't need anymore to define
+  the `app` argument (they can be functions without any argument).
+- Adds `Cache-Control: no-cache, no-store' to all responses generated for the
+  OpenID Connect flow.
+
+## [2.0a4] - 2023-03-19 :flamingo:
+
+- Adds `@app.lifespan` to support registering objects that must be initialized
+  at application start, and disposed at application shutdown.
+  The solution supports registering as many objects as desired.
+- Adds features to handle `cache-control` response headers: a decorator for
+  request handlers and a middleware to set a default value for all `GET`
+  requests resulting in responses with status `200`.
+- Adds features to control `cache-control` header for the default document
+  (e.g. `index.html`) when serving static files;
+  see [issue 297](https://github.com/Neoteroi/BlackSheep/issues/297).
+- Fixes bug in `sessions` that prevented updating the session data when using
+  the `set` and `__delitem__` methods;
+  [scottrutherford](https://github.com/scottrutherford)'s contribution.
+
+`@app.lifespan` example:
+
+```python
+from blacksheep import Application
+from blacksheep.client.session import ClientSession
+
+app = Application()
+
+
+@app.lifespan
+async def register_http_client():
+    async with ClientSession() as client:
+        print("HTTP client created and registered as singleton")
+        app.services.register(ClientSession, instance=client)
+        yield
+
+    print("HTTP client disposed")
+
+
+@app.router.get("/")
+async def home(http_client: ClientSession):
+    print(http_client)
+    return {"ok": True, "client_instance_id": id(http_client)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=44777, log_level="debug", lifespan="on")
+```
+
 ## [2.0a3] - 2023-03-12 🥐
 
 - Refactors the `ClientSession` to own by default a connections pool, if none

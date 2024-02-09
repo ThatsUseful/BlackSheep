@@ -16,7 +16,7 @@ from .url cimport URL
 
 
 cdef class Message:
-    cdef list __headers
+    cdef list _raw_headers
     cdef public Content content
     cdef object __weakref__
 
@@ -34,6 +34,7 @@ cdef class Message:
 
     cdef void remove_headers(self, list headers)
     cdef list get_headers_tuples(self, bytes key)
+    cdef void init_prop(self, str name, object value)
 
     cpdef Message with_content(self, Content content)
     cpdef bint has_body(self)
@@ -57,7 +58,6 @@ cdef class Request(Message):
 
 cdef class Response(Message):
     cdef public int status
-    cdef public bint active
     cdef dict __dict__
 
     cpdef bint is_redirect(self)

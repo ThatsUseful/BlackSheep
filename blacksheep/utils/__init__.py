@@ -1,5 +1,5 @@
 import re
-from typing import AnyStr, Tuple, Type, TypeVar
+from typing import AnyStr, Type, TypeVar
 
 T = TypeVar("T")
 
@@ -31,9 +31,15 @@ def join_fragments(*args: AnyStr) -> str:
     )
 
 
-def get_class_hierarchy(cls: Type[T]) -> Tuple[Type[T], ...]:
+def get_class_hierarchy(cls: Type[T]):
     return cls.__mro__
 
 
-def get_class_instance_hierarchy(instance: T) -> Tuple[Type[T], ...]:
+def get_class_instance_hierarchy(instance: T):
     return get_class_hierarchy(type(instance))
+
+
+def truthy(value: str, default: bool = False) -> bool:
+    if not value:
+        return default
+    return value.upper() in {"1", "TRUE"}

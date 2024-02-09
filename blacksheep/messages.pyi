@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Generator, List, Optional, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Union
 
 from guardpost import Identity
 
@@ -74,6 +74,8 @@ class Request(Message):
     ) -> "Request": ...
     @property
     def query(self) -> Dict[str, List[str]]: ...
+    @query.setter
+    def query(self, value: Dict[str, Union[str, Sequence[str]]]): ...
     @property
     def url(self) -> URL: ...
     @url.setter
@@ -117,6 +119,20 @@ class Request(Message):
     def original_client_ip(self, value: str) -> None: ...
     @property
     def path(self) -> str: ...
+    async def is_disconnected(self) -> bool:
+        """
+        Returns a value indicating whether the web request is still bound to an active
+        connection. In case of long-polling, this method returns True if the client
+        closed the original connection. For requests originated from a web browser, this
+        method returns True also if the user refreshed a page that originated a web
+        request, or the connection got lost and a page initiated a new request.
+
+        Because this method relies on reading incoming ASGI messages, it can only be
+        used for incoming web requests handled through an ASGI server, and it must not
+        be used when reading the request stream, as it cannot be read more than once.
+        When reading the request stream, catch instead MessageAborted exceptions to
+        detect if the client closed the original connection.
+        """
 
 class Response(Message):
     def __init__(
@@ -125,7 +141,6 @@ class Response(Message):
         headers: Optional[List[HeaderType]] = None,
         content: Optional[Content] = None,
     ) -> None:
-        self.__headers = headers or []
         self.status = status
         self.content = content
     def __repr__(self) -> str: ...

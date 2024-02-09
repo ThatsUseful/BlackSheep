@@ -2,6 +2,10 @@ name: Main
 
 on:
   workflow_dispatch:
+    publish_artifacts:
+      description: 'Publish artifacts (Y|N)'
+      required: true
+      default: 'N'
   release:
     types: [published]
   push:
@@ -15,6 +19,7 @@ on:
       - "*"
     paths-ignore:
       - README.md
+      - CHANGELOG.md
 
 env:
   PROJECT_NAME: blacksheep
@@ -24,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [3.8, 3.9, "3.10", "3.11"]
+        python-version: [3.8, 3.9, "3.10", "3.11", "3.12"]
     runs-on: windows-latest
     if: github.event_name == 'pull_request' || github.event_name == 'push'
 
@@ -41,7 +46,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install cython==0.29.32 --install-option="--no-cython-compile"
+          pip install cython==3.0.2
           pip install -r requirements.txt
           pip install flake8
 
@@ -66,17 +71,12 @@ jobs:
           flake8 blacksheep
           flake8 tests
 
-      - name: Test Hypercorn
-        run: |
-          SET ASGI_SERVER=hypercorn
-          pytest itests/test_server.py
-
   build:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: [3.7, 3.8, 3.9, "3.10", "3.11"]
+        python-version: [3.8, 3.9, "3.10", "3.11", "3.12"]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -90,27 +90,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: actions/cache@v1
-        id: depcache
-        with:
-          path: deps
-          key: requirements-pip-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
-
-      - name: Download dependencies
-        if: steps.depcache.outputs.cache-hit != 'true'
-        run: |
-          pip download --dest=deps -r requirements.txt
-
       - name: Install dependencies
         run: |
-          PYVER=`python -V 2>&1`
-
-          if [ "${PYVER:0:-2}" == "Python 3.10" ]; then
-            pip install -r requirements.txt
-          else
-            pip install -U --no-index --find-links=deps deps/*
-          fi
-
+          pip install -r requirements.txt
           pip install black isort flake8
 
       - name: Compile Cython extensions
@@ -120,6 +102,12 @@ jobs:
       - name: Run tests
         run: |
           pytest --doctest-modules --junitxml=junit/pytest-results-${{ matrix.os }}-${{ matrix.python-version }}.xml --cov=$PROJECT_NAME --cov-report=xml
+
+      - name: Run tests with Pydantic v2
+        run: |
+          echo "[*] The previous tests used Pydantic v1, now running with v2"
+          pip install -U pydantic==2.4.2
+          pytest
 
       - name: Run linters
         run: |
@@ -142,11 +130,11 @@ jobs:
           if [ "${PYVER:0:-2}" == "Python 3.10" ]; then
             echo "Skipping Hypercorn tests, since it fails with Python 3.10.0 on Ubuntu (2021/10/24)"
           else
-            ASGI_SERVER=hypercorn pytest itests/test_server.py
+            APP_DEFAULT_ROUTER=false ASGI_SERVER=hypercorn pytest itests/test_server.py
           fi
 
       - name: Upload pytest test results
-        uses: actions/upload-artifact@master
+        uses: actions/upload-artifact@v4
         with:
           name: pytest-results-${{ matrix.os }}-${{ matrix.python-version }}
           path: junit/pytest-results-${{ matrix.os }}-${{ matrix.python-version }}.xml
@@ -158,18 +146,18 @@ jobs:
 
       - name: Install distribution dependencies
         run: pip install --upgrade twine setuptools wheel
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == 3.10
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == 3.11
 
       - name: Create distribution package
         run: python setup.py sdist
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == 3.10
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == 3.11
 
       - name: Upload distribution package
-        uses: actions/upload-artifact@master
+        uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-ubuntu-no-wheels
           path: dist
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == 3.10
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == 3.11
 
   build-wheels:
     needs: build
@@ -178,7 +166,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [3.7, 3.8, 3.9, "3.10", "3.11"]
+        python-version: [3.8, 3.9, "3.10", "3.11", "3.12"]
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
@@ -193,8 +181,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          pip install cython --install-option="--no-cython-compile"
-          python -m pip install --upgrade setuptools pip wheel
+          pip install cython==3.0.2
+          pip install --upgrade build
 
       - name: Compile Cython extensions
         run: |
@@ -220,11 +208,11 @@ jobs:
       - name: Build wheels (non-linux)
         if: "!startsWith(matrix.os, 'ubuntu')"
         run: |
-          python setup.py bdist_wheel
+          python -m build
 
-      - uses: actions/upload-artifact@v1
+      - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-${{ matrix.os }}-${{ matrix.python-version }}
           path: dist
 
       - name: Test wheels
@@ -237,12 +225,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: [build, build-wheels]
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_artifacts == 'Y')
     steps:
       - name: Download a distribution artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
 
       - name: Use Python 3.11

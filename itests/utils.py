@@ -1,6 +1,8 @@
 import errno
 import os
 import socket
+from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
@@ -71,3 +73,19 @@ def get_sleep_time():
     if os.name == "nt":
         return 1.5
     return 0.5
+
+
+def get_test_files_url(url: str):
+    return f"my-cdn-foo:{url}"
+
+
+@contextmanager
+def temp_file(name: str):
+    file = Path(name)
+    if file.exists():
+        file.unlink()
+
+    yield file
+
+    if file.exists():
+        file.unlink()

@@ -25,6 +25,7 @@ from blacksheep.server.authentication.cookie import CookieAuthentication
 from blacksheep.server.authentication.jwt import JWTBearerAuthentication
 from blacksheep.server.authorization import allow_anonymous
 from blacksheep.server.dataprotection import generate_secret, get_serializer
+from blacksheep.server.headers.cache import cache_control
 from blacksheep.server.responses import accepted, bad_request, html, json, ok, redirect
 from blacksheep.utils import ensure_str
 from blacksheep.utils.aio import FailedRequestError, HTTPHandler
@@ -1061,6 +1062,7 @@ def use_openid_connect(
                 cookie_name=scheme_name.lower(), auth_scheme=scheme_name
             ),
         )
+
     app.use_authentication().add(auth_handler)
 
     handler = OpenIDConnectHandler(
@@ -1071,19 +1073,24 @@ def use_openid_connect(
 
     @allow_anonymous()
     @app.router.get(settings.entry_path)
+    @cache_control(no_cache=True, no_store=True)
     async def redirect_to_sign_in(request: Request):
         return await handler.redirect_to_sign_in(request)
 
     @allow_anonymous()
     @app.router.post(settings.callback_path)
+    @cache_control(no_cache=True, no_store=True)
     async def handle_auth_redirect(request: Request):
         return await handler.handle_auth_redirect(request)
 
     @app.router.get(settings.logout_path)
+    @cache_control(no_cache=True, no_store=True)
     async def redirect_to_logout(request: Request):
         return await handler.handle_logout_redirect(request)
 
+    @allow_anonymous()
     @app.router.post(settings.refresh_token_path)
+    @cache_control(no_cache=True, no_store=True)
     async def refresh_token(request: Request):
         return await handler.handle_refresh_token_request(request)
 

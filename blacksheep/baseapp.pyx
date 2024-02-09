@@ -68,14 +68,11 @@ cdef class BaseApplication:
                 str(exc)
             )
 
-    def get_route_match(self, Request request):
-        return self.router.get_match(request.method, request._path)
-
     async def handle(self, Request request):
         cdef object route
         cdef Response response
 
-        route = self.get_route_match(request)
+        route = self.router.get_match(request)
 
         if route:
             request.route_values = route.values
@@ -99,7 +96,7 @@ cdef class BaseApplication:
             await self.log_handled_exc(request, exc)
             return await self.handle_http_exception(request, exc)
 
-        if type(exc) in self.exceptions_handlers:
+        if self.is_handled_exception(exc):
             await self.log_handled_exc(request, exc)
         else:
             await self.log_unhandled_exc(request, exc)
@@ -107,7 +104,16 @@ cdef class BaseApplication:
         return await self.handle_exception(request, exc)
 
     cdef object get_http_exception_handler(self, HTTPException http_exception):
-        return self.exceptions_handlers.get(http_exception.status, common_http_exception_handler)
+        try:
+            return self.exceptions_handlers[type(http_exception)]
+        except KeyError:
+            return self.exceptions_handlers.get(http_exception.status, common_http_exception_handler)
+
+    cdef bint is_handled_exception(self, Exception exception):
+        for current_class_in_hierarchy in get_class_instance_hierarchy(exception):
+            if current_class_in_hierarchy in self.exceptions_handlers:
+                return True
+        return False
 
     cdef object get_exception_handler(self, Exception exception):
         for current_class_in_hierarchy in get_class_instance_hierarchy(exception):

@@ -17,10 +17,13 @@ from blacksheep import (
     json,
     text,
 )
+from blacksheep.contents import ASGIContent
+from blacksheep.server.compression import use_gzip_compression
 from itests.utils import CrashTest, ensure_folder
 
 app = Application(show_error_details=True)
 
+use_gzip_compression(app)
 
 static_folder_path = pathlib.Path(__file__).parent.absolute() / "static"
 
@@ -33,17 +36,17 @@ def get_static_path(file_name):
 app.serve_files(static_folder_path, discovery=True)
 
 
-@app.route("/hello-world")
+@app.router.route("/hello-world")
 async def hello_world():
     return text("Hello, World!")
 
 
-@app.route("/plain-json")
+@app.router.route("/plain-json")
 async def plain_json():
     return json({"message": "Hello, World!"})
 
 
-@app.route("/plain-json-error-simulation")
+@app.router.route("/plain-json-error-simulation")
 async def plain_json_error_simulation():
     return json({"message": "Hello, World!"}, status=500)
 
@@ -58,13 +61,13 @@ async def echo_headers(request):
     return response
 
 
-@app.route("/echo-cookies")
+@app.router.route("/echo-cookies")
 async def echo_cookies(request):
     cookies = request.cookies
     return json(cookies)
 
 
-@app.route("/set-cookie")
+@app.router.route("/set-cookie")
 async def set_cookies(name: FromQuery[str], value: FromQuery[str]):
     response = text("Setting cookie")
     response.set_cookie(Cookie(name.value, value.value))
@@ -124,7 +127,7 @@ async def echo_route_values_autobind(one, two, three):
     return json(dict(one=one, two=two, three=three))
 
 
-@app.route("/crash")
+@app.router.route("/crash")
 async def crash():
     raise CrashTest()
 
@@ -135,7 +138,7 @@ class Item:
         self.power = power
 
 
-@app.route("/echo-posted-json-autobind", methods=["POST"])
+@app.router.route("/echo-posted-json-autobind", methods=["POST"])
 async def upload_item(request, item: Item):
     assert request is not None
     assert item is not None
@@ -238,6 +241,38 @@ async def send_file_with_bytes_io():
         file_name="data.txt",
         content_disposition=ContentDispositionType.INLINE,
     )
+
+
+@app.router.get("/check-disconnected")
+async def check_disconnected(request: Request, expect_disconnected: bool):
+    check_file = pathlib.Path(".is-disconnected.txt")
+    assert await request.is_disconnected() is False
+    # Simulate a delay
+    await asyncio.sleep(0.3)
+
+    if expect_disconnected:
+        # Testing the scenario when the client disconnected
+        assert (
+            await request.is_disconnected()
+        ), "The client disconnected and this should be visible"
+        check_file.write_text("The connection was disconnected")
+    else:
+        assert (
+            await request.is_disconnected() is False
+        ), "The client did not disconnect and this should be visible"
+
+    return "OK"
+
+
+@app.router.get("/read-asgi-receive")
+def check_asgi_receive_readable(request: Request):
+    content = request.content
+    assert isinstance(content, ASGIContent)
+
+    receive = content.receive
+    assert callable(receive)
+
+    return "OK"
 
 
 if __name__ == "__main__":
